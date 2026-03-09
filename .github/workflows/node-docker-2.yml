@@ -1,0 +1,46 @@
+name: node-docker-2
+on:
+  workflow_dispatch:
+  repository_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 安装系统依赖、Docker、内网工具
+        run: |
+          apt update -y
+          apt install -y curl wget gnupg2 openssh-server openssh-client sshpass glusterfs-server docker.io
+          systemctl enable --now ssh glusterd docker
+          echo "root:${{ secrets.CLUSTER_SSH_PASS }}" | chpasswd
+          sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          systemctl restart ssh
+
+      - name: 安装并加入 Tailscale 内网穿透
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=node-docker-2 --accept-routes --force
+
+      - name: 自动加入 Swarm 多主集群
+        run: |
+          mkdir -p /data/share && chmod 777 /data/share
+          usermod -aG docker root
+          PEER_IP=$(tailscale status | grep -i "node-docker-" | grep -v "node-docker-2" | head -1 | awk '{print $1}')
+          if [ -n "$PEER_IP" ]; then
+            timeout 15 sshpass -p ${{ secrets.CLUSTER_SSH_PASS }} ssh -o StrictHostKeyChecking=no root@$PEER_IP "docker swarm join-token manager" | grep -oP 'docker swarm join .*' | sh || true
+          fi
+
+      - name: 自动续跑
+        run: |
+          (sleep 21000
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/node-docker-2.yml/dispatches \
+            -d '{"ref":"main"}'
+          ) &
+          while true; do echo "✅ node-docker-2 运行中 $(date)"; sleep 60; done
